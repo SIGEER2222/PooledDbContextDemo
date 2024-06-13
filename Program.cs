@@ -29,22 +29,22 @@ static async Task Main() {
 
   var taskSuccess = GetSuccessTasks(serviceProvider);
   await RunApplicationAsync(serviceProvider, taskSuccess);
-
+  await ClearDb(serviceProvider);
 }
 
 static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Func<BlogContext, Task>> taskGenerators) {
   using (var scope = serviceProvider.CreateScope()) {
     var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
-    using (var context = factory.CreateDbContext()) {
+    using (var masterContext = factory.CreateDbContext()) {
+      var connection = masterContext.Database.GetDbConnection();
+      await connection.OpenAsync();
 
-      var users = await context.Users.ToListAsync();
-      context.RemoveRange(users);
-      await context.SaveChangesAsync();
-
-      using (var transaction = await context.Database.BeginTransactionAsync()) {
+      using (var transaction = await connection.BeginTransactionAsync()) {
         try {
           var tasks = new List<Task>();
           foreach (var taskGenerator in taskGenerators) {
+            var context = new BlogContext(new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options);
+            context.Database.UseTransaction(transaction);
             var task = taskGenerator(context);
             tasks.Add(task);
           }
@@ -52,17 +52,32 @@ static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Fun
           await Task.WhenAll(tasks);
 
           await transaction.CommitAsync();
+
         }
         catch (Exception ex) {
           Console.WriteLine($"Transaction failed: {ex.Message}");
           await transaction.RollbackAsync();
         }
-      }
-      users = await context.Users.ToListAsync();
-      foreach (var user in users) {
-        Console.WriteLine($"User ID: {user.UserId}, User Name: {user.UserName}");
+        finally {
+          var users = await factory.CreateDbContext().Users.ToListAsync();
+          foreach (var user in users) {
+            Console.WriteLine($"User ID: {user.UserId}, User Name: {user.UserName}");
+          }
+          System.Console.WriteLine($"Users:{users.Count}");
+          await connection.CloseAsync();
+        }
       }
     }
+  }
+}
+
+static async Task ClearDb(IServiceProvider serviceProvider) {
+  using (var scope = serviceProvider.CreateScope()) {
+    var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
+    var context = factory.CreateDbContext();
+    var users = await context.Users.ToListAsync();
+    context.RemoveRange(users);
+    await context.SaveChangesAsync();
   }
 }
 
@@ -71,7 +86,11 @@ static List<Func<BlogContext, Task>> GetSuccessTasks(IServiceProvider servicePro
   var blogService = serviceProvider.GetRequiredService<BlogService>();
   for (int i = 0; i < 5; i++) {
     int userId = i;
-    tasks.Add(context => blogService.CreateUserAsync($"User {userId}", context));
+    int currentUserId = userId;
+    tasks.Add(async context => {
+      await Task.Delay(200);
+      await blogService.CreateUserAsync($"User {currentUserId}", context);
+    });
   }
   return tasks;
 }

@@ -26,14 +26,21 @@ static async Task Main() {
 
   await QueryDb(serviceProvider);
 
-  var taskFail = GetFailTasks(serviceProvider);
-  await RunApplicationAsync(serviceProvider, taskFail);
+  // var taskFail = GetFailTasks(serviceProvider);
+  // await RunApplicationAsync(serviceProvider, taskFail);
 
-  var taskSuccess = GetSuccessTasks(serviceProvider);
-  await RunApplicationAsync2(serviceProvider, new List<Task>());
-  await RunApplicationAsync(serviceProvider, taskSuccess);
-  await QueryDb(serviceProvider);
-  await ClearDb(serviceProvider);
+  try {
+    var taskSuccess = GetSuccessTasks(serviceProvider);
+    await RunApplicationAsync2(serviceProvider, new List<Task>());
+    await RunApplicationAsync(serviceProvider, taskSuccess);
+    await QueryDb(serviceProvider);
+    await ClearDb(serviceProvider);
+  }
+  catch (System.Exception ex) {
+    System.Console.WriteLine(new string('-', 50));
+    System.Console.WriteLine($"Main Transaction failed: {ex.StackTrace}");
+    throw;
+  }
 }
 
 static async Task RunApplicationAsync2(IServiceProvider serviceProvider, List<Task> tasks) {
@@ -48,6 +55,7 @@ static async Task RunApplicationAsync2(IServiceProvider serviceProvider, List<Ta
         using var context2 = new BlogContext(options);
         context2.Database.UseTransaction(transaction.GetDbTransaction());
         await blogService.CreateUserAsync($"User {i}", context2);
+        await Task.Delay(200);
       });
       tasks.Add(task);
     }
@@ -61,33 +69,34 @@ static async Task RunApplicationAsync2(IServiceProvider serviceProvider, List<Ta
 }
 
 static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Func<BlogContext, Task>> taskGenerators) {
-  // using (var scope = serviceProvider.CreateScope())
-  var factory = serviceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
-  var masterContext = factory.CreateDbContext();
-  var connection = masterContext.Database.GetDbConnection();
-  await connection.OpenAsync();
+  using (var scope = serviceProvider.CreateScope()) {
+    var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
+    using (var masterContext = factory.CreateDbContext()) {
+      var connection = masterContext.Database.GetDbConnection();
+      await connection.OpenAsync();
 
-  var transaction = await connection.BeginTransactionAsync();
-  try {
-    var tasks = new List<Task>();
-    foreach (var taskGenerator in taskGenerators) {
-      var context = new BlogContext(new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options);
-      context.Database.UseTransaction(transaction);
-      var task = taskGenerator(context);
-      tasks.Add(task);
+      using (var transaction = await connection.BeginTransactionAsync()) {
+        try {
+          var tasks = new List<Task>();
+          foreach (var taskGenerator in taskGenerators) {
+            var context = new BlogContext(new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options);
+            context.Database.UseTransaction(transaction);
+            var task = taskGenerator(context);
+            tasks.Add(task);
+          }
+
+          await Task.WhenAll(tasks);
+          await transaction.CommitAsync();
+        }
+        catch (Exception ex) {
+          Console.WriteLine($"RunApplicationAsync Transaction failed: {ex.Message}");
+          await transaction.RollbackAsync();
+        }
+        finally {
+          await connection.CloseAsync();
+        }
+      }
     }
-
-    await Task.WhenAll(tasks);
-    await transaction.CommitAsync();
-  }
-  catch (Exception ex) {
-    Console.WriteLine($"RunApplicationAsync Transaction failed: {ex.Message}");
-    await transaction.RollbackAsync();
-  }
-  finally {
-    masterContext?.Dispose();
-    transaction?.Dispose();
-    await connection?.CloseAsync();
   }
 }
 
@@ -135,29 +144,3 @@ static List<Func<BlogContext, Task>> GetFailTasks(IServiceProvider serviceProvid
   }));
   return tasks;
 }
-
-
-
-// static async Task RunApplicationAsync(IServiceProvider serviceProvider) {
-//   using (var scope = serviceProvider.CreateScope()) {
-//     var blogService = scope.ServiceProvider.GetRequiredService<BlogService>();
-
-//     var tasks = new List<Task>();
-
-//     for (int i = 0; i < 5; i++) {
-//       int userId = i;
-//       tasks.Add(Task.Run(async () => {
-//         using (var taskScope = serviceProvider.CreateScope()) {
-//           var scopedBlogService = taskScope.ServiceProvider.GetRequiredService<BlogService>();
-//           await scopedBlogService.CreateUserAsync($"User {userId}");
-//           var users = await scopedBlogService.GetAllUsersAsync();
-
-//           foreach (var user in users) {
-//             Console.WriteLine($"User ID: {user.UserId}, User Name: {user.UserName}");
-//           }
-//         }
-//       }));
-//     }
-//     await Task.WhenAll(tasks);
-//   }
-// }

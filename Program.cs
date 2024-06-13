@@ -24,44 +24,70 @@ static async Task Main() {
     }
   }
 
+  await QueryDb(serviceProvider);
+
   var taskFail = GetFailTasks(serviceProvider);
   await RunApplicationAsync(serviceProvider, taskFail);
 
   var taskSuccess = GetSuccessTasks(serviceProvider);
+  await RunApplicationAsync2(serviceProvider, new List<Task>());
   await RunApplicationAsync(serviceProvider, taskSuccess);
   await QueryDb(serviceProvider);
   await ClearDb(serviceProvider);
 }
 
-static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Func<BlogContext, Task>> taskGenerators) {
-  using (var scope = serviceProvider.CreateScope()) {
-    var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
-    using (var masterContext = factory.CreateDbContext()) {
-      var connection = masterContext.Database.GetDbConnection();
-      await connection.OpenAsync();
-
-      using (var transaction = await connection.BeginTransactionAsync()) {
-        try {
-          var tasks = new List<Task>();
-          foreach (var taskGenerator in taskGenerators) {
-            var context = new BlogContext(new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options);
-            context.Database.UseTransaction(transaction);
-            var task = taskGenerator(context);
-            tasks.Add(task);
-          }
-
-          await Task.WhenAll(tasks);
-          await transaction.CommitAsync();
-        }
-        catch (Exception ex) {
-          Console.WriteLine($"Transaction failed: {ex.Message}");
-          await transaction.RollbackAsync();
-        }
-        finally {
-          await connection.CloseAsync();
-        }
-      }
+static async Task RunApplicationAsync2(IServiceProvider serviceProvider, List<Task> tasks) {
+  using var connection = serviceProvider.GetRequiredService<IDbContextFactory<BlogContext>>().CreateDbContext().Database.GetDbConnection();
+  var options = new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options;
+  var context1 = new BlogContext(options);
+  using var transaction = context1.Database.BeginTransaction();
+  try {
+    for (int i = 0; i < 5; i++) {
+      var task = Task.Run(async () => {
+        var blogService = serviceProvider.GetRequiredService<BlogService>();
+        using var context2 = new BlogContext(options);
+        context2.Database.UseTransaction(transaction.GetDbTransaction());
+        await blogService.CreateUserAsync($"User {i}", context2);
+      });
+      tasks.Add(task);
     }
+    await Task.WhenAll(tasks);
+    await transaction.CommitAsync();
+  }
+  catch (System.Exception ex) {
+    System.Console.WriteLine(new string('-', 50));
+    System.Console.WriteLine($"RunApplicationAsync2 Transaction failed: {ex.Message}");
+  }
+}
+
+static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Func<BlogContext, Task>> taskGenerators) {
+  // using (var scope = serviceProvider.CreateScope())
+  var factory = serviceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
+  var masterContext = factory.CreateDbContext();
+  var connection = masterContext.Database.GetDbConnection();
+  await connection.OpenAsync();
+
+  var transaction = await connection.BeginTransactionAsync();
+  try {
+    var tasks = new List<Task>();
+    foreach (var taskGenerator in taskGenerators) {
+      var context = new BlogContext(new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options);
+      context.Database.UseTransaction(transaction);
+      var task = taskGenerator(context);
+      tasks.Add(task);
+    }
+
+    await Task.WhenAll(tasks);
+    await transaction.CommitAsync();
+  }
+  catch (Exception ex) {
+    Console.WriteLine($"RunApplicationAsync Transaction failed: {ex.Message}");
+    await transaction.RollbackAsync();
+  }
+  finally {
+    masterContext?.Dispose();
+    transaction?.Dispose();
+    await connection?.CloseAsync();
   }
 }
 

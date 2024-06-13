@@ -29,6 +29,7 @@ static async Task Main() {
 
   var taskSuccess = GetSuccessTasks(serviceProvider);
   await RunApplicationAsync(serviceProvider, taskSuccess);
+  await QueryDb(serviceProvider);
   await ClearDb(serviceProvider);
 }
 
@@ -50,23 +51,29 @@ static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Fun
           }
 
           await Task.WhenAll(tasks);
-
           await transaction.CommitAsync();
-
         }
         catch (Exception ex) {
           Console.WriteLine($"Transaction failed: {ex.Message}");
           await transaction.RollbackAsync();
         }
         finally {
-          var users = await factory.CreateDbContext().Users.ToListAsync();
-          foreach (var user in users) {
-            Console.WriteLine($"User ID: {user.UserId}, User Name: {user.UserName}");
-          }
-          System.Console.WriteLine($"Users:{users.Count}");
           await connection.CloseAsync();
         }
       }
+    }
+  }
+}
+
+static async Task QueryDb(IServiceProvider serviceProvider) {
+  using (var scope = serviceProvider.CreateScope()) {
+    var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
+    using (var context = factory.CreateDbContext()) {
+      var users = await context.Users.ToListAsync();
+      foreach (var user in users) {
+        Console.WriteLine($"User ID: {user.UserId}, User Name: {user.UserName}");
+      }
+      System.Console.WriteLine($"Users:{users.Count}");
     }
   }
 }

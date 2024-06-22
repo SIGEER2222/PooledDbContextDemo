@@ -1,74 +1,44 @@
-﻿using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
+﻿using System.Collections.Concurrent;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
+using PooledDbContextDemo;
 
 await Main();
 
+
 static async Task Main() {
-  var services = new ServiceCollection();
-
-  var tempPath = Path.Combine(Path.GetTempPath(), "blog.db");
-
-  services.AddPooledDbContextFactory<BlogContext>(options =>
-      options.UseSqlite(Help.ConnectionSql));
-
-  services.AddTransient<BlogService>();
-
-  var serviceProvider = services.BuildServiceProvider();
-
-  using (var scope = serviceProvider.CreateScope()) {
-    var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
-    using (var context = factory.CreateDbContext()) {
-      context.Database.EnsureCreated();
-    }
-  }
+  var serviceProvider = (await SetService()).BuildServiceProvider();
 
   await QueryDb(serviceProvider);
 
   // var taskFail = GetFailTasks(serviceProvider);
-  // await RunApplicationAsync(serviceProvider, taskFail);
+  // await RunTasksWithinTransactionAsync(serviceProvider, taskFail);
+  var taskSuccess = GetSuccessTasks(serviceProvider);
+  await ExecuteConcurrentUserCreationAsync(serviceProvider, new());
+  await RunTasksWithinTransactionAsync(serviceProvider, taskSuccess);
+  await QueryDb(serviceProvider);
+  await ClearDb(serviceProvider);
 
-  try {
-    var taskSuccess = GetSuccessTasks(serviceProvider);
-    await RunApplicationAsync2(serviceProvider, new List<Task>());
-    await RunApplicationAsync(serviceProvider, taskSuccess);
-    await QueryDb(serviceProvider);
-    await ClearDb(serviceProvider);
-  }
-  catch (System.Exception ex) {
-    System.Console.WriteLine(new string('-', 50));
-    System.Console.WriteLine($"Main Transaction failed: {ex.StackTrace}");
-    throw;
-  }
 }
 
-static async Task RunApplicationAsync2(IServiceProvider serviceProvider, List<Task> tasks) {
+static async Task ExecuteConcurrentUserCreationAsync(IServiceProvider serviceProvider, ConcurrentBag<Task> tasks) {
   using var connection = serviceProvider.GetRequiredService<IDbContextFactory<BlogContext>>().CreateDbContext().Database.GetDbConnection();
   var options = new DbContextOptionsBuilder<BlogContext>().UseSqlite(connection).Options;
   var context1 = new BlogContext(options);
   using var transaction = context1.Database.BeginTransaction();
   try {
-    for (int i = 0; i < 5; i++) {
-      var task = Task.Run(async () => {
-        var blogService = serviceProvider.GetRequiredService<BlogService>();
-        using var context2 = new BlogContext(options);
-        context2.Database.UseTransaction(transaction.GetDbTransaction());
-        await blogService.CreateUserAsync($"User {i}", context2);
-        await Task.Delay(200);
-      });
-      tasks.Add(task);
-    }
+    tasks = GetSucessTasks(serviceProvider, transaction, options);
     await Task.WhenAll(tasks);
     await transaction.CommitAsync();
   }
   catch (System.Exception ex) {
     System.Console.WriteLine(new string('-', 50));
-    System.Console.WriteLine($"RunApplicationAsync2 Transaction failed: {ex.Message}");
+    System.Console.WriteLine($"ExecuteConcurrentUserCreationAsync Transaction failed: {ex.Message}");
   }
 }
 
-static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Func<BlogContext, Task>> taskGenerators) {
+static async Task RunTasksWithinTransactionAsync(IServiceProvider serviceProvider, List<Func<BlogContext, Task>> taskGenerators) {
   using (var scope = serviceProvider.CreateScope()) {
     var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
     using (var masterContext = factory.CreateDbContext()) {
@@ -89,7 +59,7 @@ static async Task RunApplicationAsync(IServiceProvider serviceProvider, List<Fun
           await transaction.CommitAsync();
         }
         catch (Exception ex) {
-          Console.WriteLine($"RunApplicationAsync Transaction failed: {ex.Message}");
+          Console.WriteLine($"RunTasksWithinTransactionAsync Transaction failed: {ex.Message}");
           await transaction.RollbackAsync();
         }
         finally {
@@ -137,6 +107,22 @@ static List<Func<BlogContext, Task>> GetSuccessTasks(IServiceProvider servicePro
   return tasks;
 }
 
+static ConcurrentBag<Task> GetSucessTasks(IServiceProvider serviceProvider, IDbContextTransaction? transaction, DbContextOptions<BlogContext>? options) {
+  var tasks = new ConcurrentBag<Task>();
+  for (int i = 0; i < 5; i++) {
+    var task = Task.Run(async () => {
+      var blogService = serviceProvider.GetRequiredService<BlogService>();
+      using var context2 = new BlogContext(options);
+      context2.Database.UseTransaction(transaction.GetDbTransaction());
+      await blogService.CreateUserAsync($"User {i}", context2);
+      await Task.Delay(200);
+    });
+    tasks.Add(task);
+  }
+  return tasks;
+}
+
+
 static List<Func<BlogContext, Task>> GetFailTasks(IServiceProvider serviceProvider) {
   var tasks = GetSuccessTasks(serviceProvider);
   tasks.Add(context => Task.Run(async () => {
@@ -144,3 +130,25 @@ static List<Func<BlogContext, Task>> GetFailTasks(IServiceProvider serviceProvid
   }));
   return tasks;
 }
+
+
+static async Task<ServiceCollection> SetService() {
+  var services = new ServiceCollection();
+
+  var tempPath = Path.Combine(Path.GetTempPath(), "blog.db");
+
+  services.AddPooledDbContextFactory<BlogContext>(options =>
+      options.UseSqlite(Help.ConnectionSql));
+
+  services.AddTransient<BlogService>();
+
+
+  using (var scope = services.BuildServiceProvider().CreateScope()) {
+    var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BlogContext>>();
+    using (var context = factory.CreateDbContext()) {
+      context.Database.EnsureCreated();
+    }
+  }
+  return services;
+}
+

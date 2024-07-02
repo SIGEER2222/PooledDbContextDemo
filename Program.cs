@@ -70,8 +70,7 @@ static List<Func<BlogContext, Task>> GetSuccessTasks(IServiceProvider servicePro
   var tasks = new List<Func<BlogContext, Task>>();
   var blogService = serviceProvider.GetRequiredService<BlogService>();
   for (int i = 0; i < 5; i++) {
-    int userId = i;
-    int currentUserId = userId;
+    int currentUserId = i;
     tasks.Add(async context => {
       await Task.Delay(200);
       await blogService.CreateUserAsync($"User {currentUserId}", context);
